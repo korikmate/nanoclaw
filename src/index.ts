@@ -247,7 +247,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     lastAgentTimestamp[chatJid] = lastMessage.timestamp;
     saveState();
     const channel = findChannel(channels, chatJid);
-    await channel?.sendMessage?.(chatJid, 'Session lezárva. A következő üzenet új sessiont indít.');
+    await channel?.sendMessage?.(
+      chatJid,
+      'Session lezárva. A következő üzenet új sessiont indít.',
+    );
     return true;
   }
 
