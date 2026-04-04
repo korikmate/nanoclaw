@@ -12,8 +12,14 @@ import {
   CONTAINER_TIMEOUT,
   DATA_DIR,
   GROUPS_DIR,
+  GOOGLE_API_KEY,
   IDLE_TIMEOUT,
+  MEM0_EMBEDDER_MODEL,
+  MEM0_ENABLED,
+  MEM0_LLM_MODEL,
   ONECLI_URL,
+  OPENROUTER_API_KEY,
+  OPENROUTER_MODEL,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -243,12 +249,14 @@ async function buildContainerArgs(
   args.push('-e', `TZ=${TIMEZONE}`);
 
   // OpenRouter: pass model and API key if configured
-  if (process.env.OPENROUTER_MODEL) {
-    args.push('-e', `OPENROUTER_MODEL=${process.env.OPENROUTER_MODEL}`);
-  }
-  if (process.env.OPENROUTER_API_KEY) {
-    args.push('-e', `OPENROUTER_API_KEY=${process.env.OPENROUTER_API_KEY}`);
-  }
+  if (OPENROUTER_MODEL)    args.push('-e', `OPENROUTER_MODEL=${OPENROUTER_MODEL}`);
+  if (OPENROUTER_API_KEY)  args.push('-e', `OPENROUTER_API_KEY=${OPENROUTER_API_KEY}`);
+  // mem0 local memory extraction
+  if (MEM0_LLM_MODEL)      args.push('-e', `MEM0_LLM_MODEL=${MEM0_LLM_MODEL}`);
+  if (MEM0_EMBEDDER_MODEL) args.push('-e', `MEM0_EMBEDDER_MODEL=${MEM0_EMBEDDER_MODEL}`);
+  if (MEM0_ENABLED)        args.push('-e', `MEM0_ENABLED=${MEM0_ENABLED}`);
+  // Google API key for mem0 Gemini embedder
+  if (GOOGLE_API_KEY)      args.push('-e', `GOOGLE_API_KEY=${GOOGLE_API_KEY}`);
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
@@ -300,7 +308,8 @@ export async function runContainerAgent(
   const startTime = Date.now();
 
   const groupDir = resolveGroupFolderPath(group.folder);
-  fs.mkdirSync(groupDir, { recursive: true });
+  fs.mkdirSync(groupDir, { recursive: true, mode: 0o777 });
+  try { fs.chmodSync(groupDir, 0o777); } catch { /* ignore */ }
 
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
@@ -339,7 +348,8 @@ export async function runContainerAgent(
   );
 
   const logsDir = path.join(groupDir, 'logs');
-  fs.mkdirSync(logsDir, { recursive: true });
+  fs.mkdirSync(logsDir, { recursive: true, mode: 0o777 });
+  try { fs.chmodSync(logsDir, 0o777); } catch { /* ignore */ }
 
   return new Promise((resolve) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {

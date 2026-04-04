@@ -5,6 +5,7 @@ import { OneCLI } from '@onecli-sh/sdk';
 
 import {
   ASSISTANT_NAME,
+  DATA_DIR,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
@@ -28,6 +29,7 @@ import {
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
+  findOrphanContainers,
 } from './container-runtime.js';
 import {
   getAllChats,
@@ -237,6 +239,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
 
   if (missedMessages.length === 0) return true;
+
+  // /new command: close the active container (triggers mem0 extraction + fresh session)
+  const lastMessage = missedMessages[missedMessages.length - 1];
+  if (lastMessage.content.trim() === '/new') {
+    queue.closeStdin(chatJid);
+    lastAgentTimestamp[chatJid] = lastMessage.timestamp;
+    saveState();
+    const channel = findChannel(channels, chatJid);
+    await channel?.sendMessage?.(chatJid, 'Session lezárva. A következő üzenet új sessiont indít.');
+    return true;
+  }
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
@@ -562,13 +575,38 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
+async function ensureContainerSystemRunning(): Promise<void> {
   ensureContainerRuntimeRunning();
+
+  // If there are orphaned containers (from a previous run), signal them to close
+  // gracefully so OpenRouter runners can extract mem0 memories before being killed.
+  const orphans = findOrphanContainers();
+  if (orphans.length > 0) {
+    try {
+      const ipcBase = path.join(DATA_DIR, 'ipc');
+      if (fs.existsSync(ipcBase)) {
+        for (const groupFolder of fs.readdirSync(ipcBase)) {
+          const inputDir = path.join(ipcBase, groupFolder, 'input');
+          fs.mkdirSync(inputDir, { recursive: true });
+          fs.writeFileSync(path.join(inputDir, '_close'), '');
+        }
+        logger.info(
+          { orphanCount: orphans.length },
+          'Signaled orphan containers to close — waiting for memory extraction',
+        );
+        // Give OpenRouter runners up to 12s to extract memories and exit cleanly.
+        await new Promise<void>((resolve) => setTimeout(resolve, 12000));
+      }
+    } catch {
+      /* ignore, cleanupOrphans will handle the rest */
+    }
+  }
+
   cleanupOrphans();
 }
 
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  await ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
   loadState();

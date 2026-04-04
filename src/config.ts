@@ -10,6 +10,12 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
   'TZ',
+  'OPENROUTER_API_KEY',
+  'OPENROUTER_MODEL',
+  'GOOGLE_API_KEY',
+  'MEM0_LLM_MODEL',
+  'MEM0_EMBEDDER_MODEL',
+  'MEM0_ENABLED',
 ]);
 
 export const ASSISTANT_NAME =
@@ -95,3 +101,11 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// OpenRouter / mem0 — read from .env at startup
+export const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || envConfig.OPENROUTER_API_KEY;
+export const OPENROUTER_MODEL   = process.env.OPENROUTER_MODEL   || envConfig.OPENROUTER_MODEL;
+export const GOOGLE_API_KEY     = process.env.GOOGLE_API_KEY     || envConfig.GOOGLE_API_KEY;
+export const MEM0_LLM_MODEL     = process.env.MEM0_LLM_MODEL     || envConfig.MEM0_LLM_MODEL;
+export const MEM0_EMBEDDER_MODEL = process.env.MEM0_EMBEDDER_MODEL || envConfig.MEM0_EMBEDDER_MODEL;
+export const MEM0_ENABLED       = process.env.MEM0_ENABLED       || envConfig.MEM0_ENABLED;
