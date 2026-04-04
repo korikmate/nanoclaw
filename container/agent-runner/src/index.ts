@@ -23,6 +23,7 @@ import {
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { runOpenRouterAgent } from './openrouter-runner.js';
 
 interface ContainerInput {
   prompt: string;
@@ -619,6 +620,14 @@ async function main(): Promise<void> {
       error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`,
     });
     process.exit(1);
+  }
+
+  // If OPENROUTER_MODEL is set and it's not a Claude model, use OpenRouter runner
+  const openRouterModel = process.env.OPENROUTER_MODEL;
+  if (openRouterModel && !openRouterModel.startsWith('anthropic/')) {
+    log(`Using OpenRouter runner with model: ${openRouterModel}`);
+    await runOpenRouterAgent(containerInput);
+    return;
   }
 
   // Credentials are injected by the host's credential proxy via ANTHROPIC_BASE_URL.

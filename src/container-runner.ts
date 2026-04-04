@@ -242,6 +242,14 @@ async function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
+  // OpenRouter: pass model and API key if configured
+  if (process.env.OPENROUTER_MODEL) {
+    args.push('-e', `OPENROUTER_MODEL=${process.env.OPENROUTER_MODEL}`);
+  }
+  if (process.env.OPENROUTER_API_KEY) {
+    args.push('-e', `OPENROUTER_API_KEY=${process.env.OPENROUTER_API_KEY}`);
+  }
+
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
   const onecliApplied = await onecli.applyContainerConfig(args, {
