@@ -15,6 +15,15 @@ vi.mock('./config.js', () => ({
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
   ONECLI_URL: 'http://localhost:10254',
+  GOOGLE_API_KEY: undefined,
+  HA_MCP_TOKEN: undefined,
+  HA_MCP_URL: undefined,
+  MEM0_EMBEDDER_MODEL: undefined,
+  MEM0_ENABLED: undefined,
+  MEM0_LLM_MODEL: undefined,
+  OPENROUTER_API_KEY: undefined,
+  OPENROUTER_MODEL: undefined,
+  OPENROUTER_PROVIDER: undefined,
   TIMEZONE: 'America/Los_Angeles',
 }));
 
