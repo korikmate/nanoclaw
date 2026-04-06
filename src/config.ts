@@ -119,7 +119,5 @@ export const MEM0_LLM_MODEL =
 export const MEM0_EMBEDDER_MODEL =
   process.env.MEM0_EMBEDDER_MODEL || envConfig.MEM0_EMBEDDER_MODEL;
 export const MEM0_ENABLED = process.env.MEM0_ENABLED || envConfig.MEM0_ENABLED;
-export const HA_MCP_URL =
-  process.env.HA_MCP_URL || envConfig.HA_MCP_URL;
-export const HA_MCP_TOKEN =
-  process.env.HA_MCP_TOKEN || envConfig.HA_MCP_TOKEN;
+export const HA_MCP_URL = process.env.HA_MCP_URL || envConfig.HA_MCP_URL;
+export const HA_MCP_TOKEN = process.env.HA_MCP_TOKEN || envConfig.HA_MCP_TOKEN;

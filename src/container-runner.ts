@@ -266,7 +266,8 @@ async function buildContainerArgs(
 
   // OpenRouter: pass model and API key if configured
   if (OPENROUTER_MODEL) args.push('-e', `OPENROUTER_MODEL=${OPENROUTER_MODEL}`);
-  if (OPENROUTER_PROVIDER) args.push('-e', `OPENROUTER_PROVIDER=${OPENROUTER_PROVIDER}`);
+  if (OPENROUTER_PROVIDER)
+    args.push('-e', `OPENROUTER_PROVIDER=${OPENROUTER_PROVIDER}`);
   if (OPENROUTER_API_KEY)
     args.push('-e', `OPENROUTER_API_KEY=${OPENROUTER_API_KEY}`);
   // mem0 local memory extraction
