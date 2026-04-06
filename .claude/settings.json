@@ -7,5 +7,13 @@
         "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIzNTQ3NzhlNjY2OGU0MDBlOWNiZmYwNGQ2NDk1ZTU2NyIsImlhdCI6MTc3NTM4MzgxMywiZXhwIjoyMDkwNzQzODEzfQ.4xhIWYHA2mcrYUzV7QH-W6XATrMvUUEu-tffGNTglQE"
       }
     }
+  },
+  "sandbox": {
+    "network": {
+      "allowedDomains": [
+        "npm.registry.com",
+        "us.i.posthog.com"
+      ]
+    }
   }
 }
