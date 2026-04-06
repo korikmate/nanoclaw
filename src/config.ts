@@ -12,10 +12,13 @@ const envConfig = readEnvFile([
   'TZ',
   'OPENROUTER_API_KEY',
   'OPENROUTER_MODEL',
+  'OPENROUTER_PROVIDER',
   'GOOGLE_API_KEY',
   'MEM0_LLM_MODEL',
   'MEM0_EMBEDDER_MODEL',
   'MEM0_ENABLED',
+  'HA_MCP_URL',
+  'HA_MCP_TOKEN',
 ]);
 
 export const ASSISTANT_NAME =
@@ -107,6 +110,8 @@ export const OPENROUTER_API_KEY =
   process.env.OPENROUTER_API_KEY || envConfig.OPENROUTER_API_KEY;
 export const OPENROUTER_MODEL =
   process.env.OPENROUTER_MODEL || envConfig.OPENROUTER_MODEL;
+export const OPENROUTER_PROVIDER =
+  process.env.OPENROUTER_PROVIDER || envConfig.OPENROUTER_PROVIDER;
 export const GOOGLE_API_KEY =
   process.env.GOOGLE_API_KEY || envConfig.GOOGLE_API_KEY;
 export const MEM0_LLM_MODEL =
@@ -114,3 +119,7 @@ export const MEM0_LLM_MODEL =
 export const MEM0_EMBEDDER_MODEL =
   process.env.MEM0_EMBEDDER_MODEL || envConfig.MEM0_EMBEDDER_MODEL;
 export const MEM0_ENABLED = process.env.MEM0_ENABLED || envConfig.MEM0_ENABLED;
+export const HA_MCP_URL =
+  process.env.HA_MCP_URL || envConfig.HA_MCP_URL;
+export const HA_MCP_TOKEN =
+  process.env.HA_MCP_TOKEN || envConfig.HA_MCP_TOKEN;

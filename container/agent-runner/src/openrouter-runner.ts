@@ -24,6 +24,7 @@ import { fileURLToPath } from 'url';
 import OpenAI from 'openai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { Memory } from 'mem0ai/oss';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 const MAX_TOOL_CALLS = 50;
 const BASH_TIMEOUT_MS = 30_000;
-const MAX_HISTORY_MESSAGES = 40;
+const MAX_HISTORY_MESSAGES = 8;
 const SESSION_FILE = '/workspace/group/.openrouter-session.json';
 const MEM0_DIR = '/workspace/group/.mem0';
 const MEMORIES_FILE = path.join(MEM0_DIR, 'memories.json');
@@ -419,6 +420,15 @@ async function startMcpClient(
   return client;
 }
 
+async function startHaMcpClient(url: string, token: string): Promise<Client> {
+  const transport = new SSEClientTransport(new URL(url), {
+    requestInit: { headers: { Authorization: `Bearer ${token}` } },
+  });
+  const client = new Client({ name: 'ha-mcp-client', version: '1.0.0' });
+  await client.connect(transport);
+  return client;
+}
+
 // ─── IPC helpers ─────────────────────────────────────────────────────────────
 
 function shouldClose(): boolean {
@@ -467,16 +477,20 @@ async function runQuery(
   model: string,
   systemPrompt: string,
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+  haClient?: Client | null,
 ): Promise<string> {
   const allTools = [...LOCAL_TOOLS, ...mcpTools];
   let toolCallCount = 0;
 
   while (true) {
-    const response = await openai.chat.completions.create({
+    const provider = process.env.OPENROUTER_PROVIDER;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const response = await (openai.chat.completions.create as (body: any) => Promise<any>)({
       model,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
       tools: allTools,
       tool_choice: 'auto',
+      ...(provider ? { provider: { order: [provider], allow_fallbacks: false } } : {}),
     });
 
     const choice = response.choices[0];
@@ -502,7 +516,15 @@ async function runQuery(
       log(`Tool #${toolCallCount}: ${toolName}`);
       let result: string;
 
-      if (toolName.startsWith('mcp__') && mcpClient) {
+      if (toolName.startsWith('mcp__home_assistant__') && haClient) {
+        try {
+          const mcpResult = await haClient.callTool({ name: toolName.slice('mcp__home_assistant__'.length), arguments: toolArgs });
+          const content = mcpResult.content as { type: string; text?: string }[];
+          result = content.filter((c) => c.type === 'text').map((c) => c.text || '').join('\n');
+        } catch (err) {
+          result = `HA MCP error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      } else if (toolName.startsWith('mcp__') && mcpClient) {
         try {
           const mcpResult = await mcpClient.callTool({ name: toolName.slice(5), arguments: toolArgs });
           const content = mcpResult.content as { type: string; text?: string }[];
@@ -555,6 +577,29 @@ export async function runOpenRouterAgent(input: ContainerInput): Promise<void> {
     log(`MCP unavailable: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // Home Assistant MCP server (SSE)
+  let haClient: Client | null = null;
+  const haMcpUrl = process.env.HA_MCP_URL;
+  const haMcpToken = process.env.HA_MCP_TOKEN;
+  if (haMcpUrl && haMcpToken) {
+    try {
+      haClient = await startHaMcpClient(haMcpUrl, haMcpToken);
+      const { tools: haTools } = await haClient.listTools();
+      const haOpenAITools = haTools.map((t) => ({
+        type: 'function' as const,
+        function: {
+          name: `mcp__home_assistant__${t.name}`,
+          description: t.description,
+          parameters: (t.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
+        },
+      }));
+      mcpTools = [...mcpTools, ...haOpenAITools];
+      log(`HA MCP connected: ${haTools.map((t) => t.name).join(', ')}`);
+    } catch (err) {
+      log(`HA MCP unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // Load long-term memories from disk
   const storedMemories = mem0Enabled ? loadStoredMemories() : [];
 
@@ -596,7 +641,7 @@ export async function runOpenRouterAgent(input: ContainerInput): Promise<void> {
   try {
     while (true) {
       log(`Running query with model: ${model}`);
-      const result = await runQuery(openai, mcpClient, mcpTools, model, systemPrompt, messages);
+      const result = await runQuery(openai, mcpClient, mcpTools, model, systemPrompt, messages, haClient);
 
       saveSessionHistory(messages);
       writeOutput({ status: 'success', result });
@@ -622,5 +667,6 @@ export async function runOpenRouterAgent(input: ContainerInput): Promise<void> {
     writeOutput({ status: 'error', result: null, error: errorMessage });
   } finally {
     if (mcpClient) { try { await mcpClient.close(); } catch { /* ignore */ } }
+    if (haClient) { try { await haClient.close(); } catch { /* ignore */ } }
   }
 }

@@ -13,6 +13,8 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   GOOGLE_API_KEY,
+  HA_MCP_URL,
+  HA_MCP_TOKEN,
   IDLE_TIMEOUT,
   MEM0_EMBEDDER_MODEL,
   MEM0_ENABLED,
@@ -20,6 +22,7 @@ import {
   ONECLI_URL,
   OPENROUTER_API_KEY,
   OPENROUTER_MODEL,
+  OPENROUTER_PROVIDER,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -140,6 +143,18 @@ function buildVolumeMounts(
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
+  // Load MCP server config from project root .mcp.json if present
+  const hostMcpPath = path.join(process.cwd(), '.mcp.json');
+  let mcpServers: Record<string, unknown> = {};
+  if (fs.existsSync(hostMcpPath)) {
+    try {
+      const mcpConfig = JSON.parse(fs.readFileSync(hostMcpPath, 'utf8'));
+      if (mcpConfig.mcpServers) mcpServers = mcpConfig.mcpServers;
+    } catch {
+      logger.warn('Failed to parse .mcp.json, skipping MCP servers');
+    }
+  }
+
   if (!fs.existsSync(settingsFile)) {
     fs.writeFileSync(
       settingsFile,
@@ -156,6 +171,7 @@ function buildVolumeMounts(
             // https://code.claude.com/docs/en/memory#manage-auto-memory
             CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
           },
+          ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
         },
         null,
         2,
@@ -250,6 +266,7 @@ async function buildContainerArgs(
 
   // OpenRouter: pass model and API key if configured
   if (OPENROUTER_MODEL) args.push('-e', `OPENROUTER_MODEL=${OPENROUTER_MODEL}`);
+  if (OPENROUTER_PROVIDER) args.push('-e', `OPENROUTER_PROVIDER=${OPENROUTER_PROVIDER}`);
   if (OPENROUTER_API_KEY)
     args.push('-e', `OPENROUTER_API_KEY=${OPENROUTER_API_KEY}`);
   // mem0 local memory extraction
@@ -259,6 +276,9 @@ async function buildContainerArgs(
   if (MEM0_ENABLED) args.push('-e', `MEM0_ENABLED=${MEM0_ENABLED}`);
   // Google API key for mem0 Gemini embedder
   if (GOOGLE_API_KEY) args.push('-e', `GOOGLE_API_KEY=${GOOGLE_API_KEY}`);
+  // Home Assistant MCP server
+  if (HA_MCP_URL) args.push('-e', `HA_MCP_URL=${HA_MCP_URL}`);
+  if (HA_MCP_TOKEN) args.push('-e', `HA_MCP_TOKEN=${HA_MCP_TOKEN}`);
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.

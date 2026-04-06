@@ -1,3 +1,11 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "home-assistant": {
+      "type": "sse",
+      "url": "https://cqu751lk1lsdijnekmgykdzwus862q72.ui.nabu.casa/mcp_server/sse",
+      "headers": {
+        "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIzNTQ3NzhlNjY2OGU0MDBlOWNiZmYwNGQ2NDk1ZTU2NyIsImlhdCI6MTc3NTM4MzgxMywiZXhwIjoyMDkwNzQzODEzfQ.4xhIWYHA2mcrYUzV7QH-W6XATrMvUUEu-tffGNTglQE"
+      }
+    }
+  }
 }

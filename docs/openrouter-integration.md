@@ -155,6 +155,9 @@ Szerkeszd a `.env` fájlt:
 OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxx
 OPENROUTER_MODEL=openai/gpt-4o
 
+# Provider rögzítése (opcionális) — ha meg van adva, csak az adott providertől kér
+# OPENROUTER_PROVIDER=DeepSeek
+
 # Mem0 lokális memória — Google API kulcs szükséges az embedder modellhez
 GOOGLE_API_KEY=AIza...                         # Google AI Studio: aistudio.google.com/apikey
 MEM0_LLM_MODEL=qwen/qwen3-235b-a22b-2507      # LLM az extrakciőhoz (alapból: OPENROUTER_MODEL)
@@ -163,6 +166,16 @@ MEM0_EMBEDDER_MODEL=gemini-embedding-2-preview # embedder modell
 ```
 
 > **Modell ID formátum:** az `OPENROUTER_MODEL`, `MEM0_LLM_MODEL` értékeket OpenRouter slug formátumban kell megadni (pl. `openai/gpt-4o`, `meta-llama/llama-3.3-70b-instruct`). Nem kell `openrouter/` prefix.
+
+### Provider rögzítése (opcionális)
+
+Ha `OPENROUTER_PROVIDER` be van állítva, minden kérés csak az adott providertől megy ki (`allow_fallbacks: false`). Ha a provider nem elérhető, a kérés hibával tér vissza — nincs fallback.
+
+```bash
+OPENROUTER_PROVIDER=DeepSeek   # csak DeepSeek-et használ
+```
+
+Provider slug-ok: `DeepSeek`, `Fireworks`, `Together`, `Lepton`, `Novita`, `Hyperbolic` stb. — az OpenRouter modell oldalán a „Providers" fül alatt láthatók. Ha nincs megadva, az OpenRouter automatikusan választ a legolcsóbb/leggyorsabb elérhető provider közül.
 
 Szinkronizáld a container környezetbe:
 
@@ -227,5 +240,5 @@ cp .env data/env/env && systemctl restart nanoclaw
 
 - **Nincs agent-browser** nem-Claude modelleknél: a Playwright-alapú böngészővezérlés csak Claude Code CLI-n keresztül érhető el.
 - **Web search korlátozott**: a DuckDuckGo JSON API nem adja vissza a teljes keresési eredményt, csak az abstract és related topics mezőket.
-- **Session history max. 40 üzenet**: ennél hosszabb beszélgetések régebbi részei törlődnek — a tények viszont megmaradnak a mem0 hosszú távú memóriában.
+- **Session history max. 8 üzenet**: ennél hosszabb beszélgetések régebbi részei törlődnek — a tények viszont megmaradnak a mem0 hosszú távú memóriában.
 - **Service restart 12s delay**: ha vannak orphan containerek induláskor, a service 12 másodpercet vár a mem0 extrakció befejezésére. Ez csak ritkán (pl. crash után) fordul elő.

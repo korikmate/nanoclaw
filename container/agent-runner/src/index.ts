@@ -470,6 +470,7 @@ async function runQuery(
         'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
+        ...(process.env.HA_MCP_URL ? ['mcp__home-assistant__*'] : []),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -485,6 +486,17 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
+        ...(process.env.HA_MCP_URL && process.env.HA_MCP_TOKEN
+          ? {
+              'home-assistant': {
+                type: 'sse' as const,
+                url: process.env.HA_MCP_URL,
+                headers: {
+                  Authorization: `Bearer ${process.env.HA_MCP_TOKEN}`,
+                },
+              },
+            }
+          : {}),
       },
       hooks: {
         PreCompact: [
