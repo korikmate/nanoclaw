@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
@@ -12,6 +13,8 @@ import {
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
   ONECLI_URL,
+  OPENROUTER_MODEL,
+  OPENROUTER_PROVIDER,
   POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -241,17 +244,63 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // /new command: close the active container (triggers mem0 extraction + fresh session)
+  // Built-in control commands
   const lastMessage = missedMessages[missedMessages.length - 1];
-  if (lastMessage.content.trim() === '/new') {
+  const cmd = lastMessage.content.trim();
+
+  // /new — graceful container close + fresh session
+  if (cmd === '/new') {
     queue.closeStdin(chatJid);
     lastAgentTimestamp[chatJid] = lastMessage.timestamp;
     saveState();
     const channel = findChannel(channels, chatJid);
-    await channel?.sendMessage?.(
-      chatJid,
-      'Session lezárva. A következő üzenet új sessiont indít.',
-    );
+    await channel?.sendMessage?.(chatJid, 'Session lezárva. A következő üzenet új sessiont indít.');
+    return true;
+  }
+
+  // /kill — force-kill the active Docker container
+  if (cmd === '/kill') {
+    lastAgentTimestamp[chatJid] = lastMessage.timestamp;
+    saveState();
+    const channel = findChannel(channels, chatJid);
+    const killed = queue.killContainer(chatJid);
+    await channel?.sendMessage?.(chatJid, killed ? 'Container leállítva.' : 'Nincs aktív container.');
+    return true;
+  }
+
+  // /status — show model, provider, active container info
+  if (cmd === '/status') {
+    lastAgentTimestamp[chatJid] = lastMessage.timestamp;
+    saveState();
+    const channel = findChannel(channels, chatJid);
+    const model = OPENROUTER_MODEL || '(nincs beállítva)';
+    const provider = OPENROUTER_PROVIDER || '(auto)';
+    const active = queue.isActive(chatJid);
+    const groupInfo = registeredGroups[chatJid];
+    const lines = [
+      `*NanoClaw status*`,
+      `Model: \`${model}\``,
+      `Provider: \`${provider}\``,
+      `Container: ${active ? 'fut' : 'áll'}`,
+      `Group: ${groupInfo?.name ?? chatJid}`,
+    ];
+    await channel?.sendMessage?.(chatJid, lines.join('\n'));
+    return true;
+  }
+
+  // /restart — restart the nanoclaw process entirely
+  if (cmd === '/restart') {
+    lastAgentTimestamp[chatJid] = lastMessage.timestamp;
+    saveState();
+    const channel = findChannel(channels, chatJid);
+    await channel?.sendMessage?.(chatJid, 'Újraindítás...');
+    const scriptPath = path.resolve(process.argv[1]);
+    // Start the new process ONLY after the current one has fully exited —
+    // no 2-second overlap that could cause duplicate message processing.
+    process.once('exit', () => {
+      spawn('node', [scriptPath], { detached: true, stdio: 'ignore' }).unref();
+    });
+    process.exit(0);
     return true;
   }
 
@@ -598,8 +647,8 @@ async function ensureContainerSystemRunning(): Promise<void> {
           { orphanCount: orphans.length },
           'Signaled orphan containers to close — waiting for memory extraction',
         );
-        // Give OpenRouter runners up to 12s to extract memories and exit cleanly.
-        await new Promise<void>((resolve) => setTimeout(resolve, 12000));
+        // Give OpenRouter runners up to 60s to extract memories and exit cleanly.
+        await new Promise<void>((resolve) => setTimeout(resolve, 60000));
       }
     } catch {
       /* ignore, cleanupOrphans will handle the rest */
@@ -609,7 +658,38 @@ async function ensureContainerSystemRunning(): Promise<void> {
   cleanupOrphans();
 }
 
+const LOCK_FILE = path.join(DATA_DIR, 'nanoclaw.lock');
+
+/**
+ * Write a PID lock file so a second instance can detect and kill the first.
+ * Prevents duplicate message processing when two processes run concurrently.
+ */
+function acquireSingleInstanceLock(): void {
+  try {
+    // Kill any previous instance recorded in the lock file
+    if (fs.existsSync(LOCK_FILE)) {
+      const raw = fs.readFileSync(LOCK_FILE, 'utf-8').trim();
+      const existingPid = parseInt(raw, 10);
+      if (!isNaN(existingPid) && existingPid !== process.pid) {
+        try {
+          process.kill(existingPid, 0); // throws if not running
+          logger.warn({ existingPid }, 'Killing previous nanoclaw instance (lock file)');
+          process.kill(existingPid, 'SIGTERM');
+        } catch {
+          // Stale lock — process already gone
+        }
+      }
+    }
+    fs.writeFileSync(LOCK_FILE, String(process.pid));
+    // Clean up lock on exit so a restart doesn't see a stale PID
+    process.once('exit', () => { try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ } });
+  } catch (err) {
+    logger.warn({ err }, 'Could not manage instance lock file');
+  }
+}
+
 async function main(): Promise<void> {
+  acquireSingleInstanceLock();
   await ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');

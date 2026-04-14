@@ -2,7 +2,7 @@ import fs from 'fs';
 import https from 'https';
 import path from 'path';
 
-import { Api, Bot } from 'grammy';
+import { Api, Bot, GrammyError } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
@@ -39,8 +39,15 @@ async function sendTelegramMessage(
       parse_mode: 'Markdown',
     });
   } catch (err) {
-    // Fallback: send as plain text if Markdown parsing fails
-    logger.debug({ err }, 'Markdown send failed, falling back to plain text');
+    // Only retry as plain text for Markdown parse errors (400 "can't parse entities").
+    // All other errors (network timeout, rate limit, etc.) are re-thrown — retrying
+    // them would send the message twice if the first attempt was already delivered.
+    const isMarkdownError =
+      err instanceof GrammyError &&
+      err.error_code === 400 &&
+      err.description.toLowerCase().includes('parse');
+    if (!isMarkdownError) throw err;
+    logger.debug({ err }, 'Markdown parse failed, falling back to plain text');
     await api.sendMessage(chatId, text, options);
   }
 }

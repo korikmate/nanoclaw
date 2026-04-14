@@ -634,10 +634,11 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // If OPENROUTER_MODEL is set and it's not a Claude model, use OpenRouter runner
+  // Use OpenRouter runner if LOCAL_MODEL is set, or OPENROUTER_MODEL is set to a non-Claude model
   const openRouterModel = process.env.OPENROUTER_MODEL;
-  if (openRouterModel && !openRouterModel.startsWith('anthropic/')) {
-    log(`Using OpenRouter runner with model: ${openRouterModel}`);
+  const localModel = process.env.LOCAL_MODEL;
+  if (localModel || (openRouterModel && !openRouterModel.startsWith('anthropic/'))) {
+    log(`Using OpenRouter runner with model: ${localModel || openRouterModel}`);
     await runOpenRouterAgent(containerInput);
     return;
   }

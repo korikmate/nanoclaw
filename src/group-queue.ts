@@ -4,6 +4,7 @@ import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
 import { logger } from './logger.js';
+import { stopContainer } from './container-runtime.js';
 
 interface QueuedTask {
   id: string;
@@ -139,6 +140,27 @@ export class GroupQueue {
     state.process = proc;
     state.containerName = containerName;
     if (groupFolder) state.groupFolder = groupFolder;
+  }
+
+  /** Returns true if a container is currently running for this group. */
+  isActive(groupJid: string): boolean {
+    return this.getGroup(groupJid).active;
+  }
+
+  /**
+   * Force-kill the active Docker container for a group.
+   * Returns true if a container was found and kill was attempted.
+   */
+  killContainer(groupJid: string): boolean {
+    const state = this.getGroup(groupJid);
+    if (!state.containerName) return false;
+    try {
+      stopContainer(state.containerName);
+      return true;
+    } catch (err) {
+      logger.warn({ groupJid, err }, 'killContainer failed');
+      return false;
+    }
   }
 
   /**

@@ -26,6 +26,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { Memory } from 'mem0ai/oss';
+import { GoogleGenAI } from '@google/genai';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -60,6 +61,10 @@ const IPC_POLL_MS = 500;
 const MAX_TOOL_CALLS = 50;
 const BASH_TIMEOUT_MS = 30_000;
 const MAX_HISTORY_MESSAGES = 8;
+// Session older than this is discarded — forces a fresh context after long inactivity.
+// Matches the container IDLE_TIMEOUT default (30min) with a multiplier so the session
+// survives a brief idle but not an overnight gap.
+const SESSION_MAX_AGE_MS = 2 * 60 * 60 * 1000; // 2 hours
 const SESSION_FILE = '/workspace/group/.openrouter-session.json';
 const MEM0_DIR = '/workspace/group/.mem0';
 const MEMORIES_FILE = path.join(MEM0_DIR, 'memories.json');
@@ -83,6 +88,12 @@ function loadSessionHistory(): OpenAI.Chat.Completions.ChatCompletionMessagePara
   try {
     if (!fs.existsSync(SESSION_FILE)) return [];
     const data: SessionHistory = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8'));
+    const ageMs = Date.now() - new Date(data.updatedAt).getTime();
+    if (ageMs > SESSION_MAX_AGE_MS) {
+      log(`Session expired (age: ${Math.round(ageMs / 60000)}min > ${SESSION_MAX_AGE_MS / 60000}min limit) — starting fresh`);
+      fs.unlinkSync(SESSION_FILE);
+      return [];
+    }
     log(`Loaded ${data.messages.length} messages from session history (${data.updatedAt})`);
     return data.messages;
   } catch (err) {
@@ -95,7 +106,24 @@ function saveSessionHistory(
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
 ): void {
   try {
-    const trimmed = messages.slice(-MAX_HISTORY_MESSAGES);
+    // Filter out assistant messages with null/empty content and no tool_calls — these
+    // are corrupted entries (e.g. thinking-only model responses) that confuse subsequent runs.
+    const clean = messages.filter((m) => {
+      if (m.role !== 'assistant') return true;
+      const hasContent = m.content !== null && m.content !== undefined && m.content !== '';
+      const hasCalls = Array.isArray((m as { tool_calls?: unknown[] }).tool_calls) && (m as { tool_calls?: unknown[] }).tool_calls!.length > 0;
+      return hasContent || hasCalls;
+    });
+    // Slice to the last N messages, then strip any leading tool/orphaned messages so
+    // the history always starts with a 'user' message. Without this, when a long
+    // conversation is trimmed from the front, orphaned 'tool' messages (whose parent
+    // assistant tool_call was cut off) cause a 400 from the provider.
+    let trimmed = clean.slice(-MAX_HISTORY_MESSAGES);
+    const firstUserIdx = trimmed.findIndex((m) => m.role === 'user');
+    // If there's no user message at all (e.g. history is only tool/assistant fragments
+    // from a crashed mid-tool-call run), discard the whole history — it's unsalvageable.
+    if (firstUserIdx === -1) { trimmed = []; }
+    else if (firstUserIdx > 0) trimmed = trimmed.slice(firstUserIdx);
     const tmp = SESSION_FILE + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify({ messages: trimmed, updatedAt: new Date().toISOString() }, null, 2));
     fs.renameSync(tmp, SESSION_FILE);
@@ -106,28 +134,197 @@ function saveSessionHistory(
 
 // ─── Long-term memory (mem0ai/oss — local, no cloud) ─────────────────────────
 
-/** Load persisted memory strings from JSON file */
-function loadStoredMemories(): string[] {
+interface StoredMemoryEntry {
+  id?: string;
+  text: string;
+  createdAt?: string;
+  embedding?: number[];
+}
+
+/** Load raw memory entries (text + optional embedding) from JSON file */
+function loadMemoryEntries(): StoredMemoryEntry[] {
   try {
     if (!fs.existsSync(MEMORIES_FILE)) return [];
     const data = JSON.parse(fs.readFileSync(MEMORIES_FILE, 'utf-8'));
-    const items: string[] = Array.isArray(data) ? data : [];
-    log(`Loaded ${items.length} long-term memories from ${MEMORIES_FILE}`);
-    return items;
+    // Support both legacy string[] and new {text, embedding}[] format
+    if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+      return (data as string[]).map((text) => ({ text }));
+    }
+    return Array.isArray(data) ? (data as StoredMemoryEntry[]) : [];
   } catch (err) {
     log(`Failed to load memories: ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
 }
 
-/** Persist memory strings to JSON file */
-function saveStoredMemories(memories: string[]): void {
+/** Compute Gemini embedding for a text string */
+async function computeEmbedding(text: string, googleApiKey: string, model: string): Promise<number[] | null> {
+  try {
+    const genai = new GoogleGenAI({ apiKey: googleApiKey });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (genai.models.embedContent as (opts: any) => Promise<any>)({
+      model,
+      contents: text,
+      config: { outputDimensionality: GEMINI_EMBEDDING_DIMS },
+    });
+    return result.embeddings?.[0]?.values ?? null;
+  } catch (err) {
+    log(`Embedding failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/** Cosine similarity between two vectors */
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return normA && normB ? dot / (Math.sqrt(normA) * Math.sqrt(normB)) : 0;
+}
+
+/**
+ * Load the most relevant memories for a given query using semantic search.
+ * Returns an empty list if embeddings are unavailable rather than falling back
+ * to unfiltered results, which would inject irrelevant context.
+ */
+async function loadRelevantMemories(
+  query: string,
+  googleApiKey: string | undefined,
+  embedderModel: string,
+  topK = 4,
+): Promise<string[]> {
+  const entries = loadMemoryEntries();
+  if (entries.length === 0) return [];
+  log(`Loaded ${entries.length} long-term memories from ${MEMORIES_FILE}`);
+
+  // Without a Google API key we can't do semantic search — return nothing rather
+  // than dumping all memories and injecting irrelevant context.
+  if (!googleApiKey) {
+    log('No Google API key — skipping memory retrieval to avoid irrelevant context');
+    return [];
+  }
+
+  // Compute query embedding
+  const queryEmbedding = await computeEmbedding(query, googleApiKey, embedderModel);
+  if (!queryEmbedding) {
+    log('Query embedding failed — skipping memory retrieval to avoid irrelevant context');
+    return [];
+  }
+
+  // Score each memory by similarity
+  const scored = entries.map((entry) => ({
+    text: entry.text,
+    score: entry.embedding ? cosineSimilarity(queryEmbedding, entry.embedding) : -1,
+  }));
+
+  // Sort descending by score, take top 4
+  scored.sort((a, b) => b.score - a.score);
+  const relevant = scored.slice(0, topK).filter((m) => m.score > 0);
+  log(`Semantic search: top ${relevant.length}/${entries.length} memories selected`);
+  return relevant.map((m) => m.text);
+}
+
+/** Format memory strings as an XML context block for JIT injection */
+function formatMemoryContext(memories: string[]): string {
+  const items = memories.map((m) => `    - ${m}`).join('\n');
+  return `<context>\n  <relevant_memories>\n${items}\n  </relevant_memories>\n</context>\n\n`;
+}
+
+/** Strip all injected <context>…</context> blocks from a single content string */
+function stripMemoryContext(content: string): string {
+  return content.replace(/<context>[\s\S]*?<\/context>\n\n/g, '').replace(/<context>[\s\S]*?<\/context>/g, '').trimStart();
+}
+
+/**
+ * JIT injection: find the last user message, query mem0 for relevant memories
+ * using that message as the semantic query, and prepend the XML context block.
+ * Mutates the messages array in-place.
+ */
+async function injectJitMemoryContext(
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+  googleApiKey: string | undefined,
+  embedderModel: string,
+): Promise<void> {
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') { lastUserIdx = i; break; }
+  }
+  if (lastUserIdx === -1) return;
+
+  const lastUserMsg = messages[lastUserIdx];
+  if (typeof lastUserMsg.content !== 'string') return;
+
+  const memories = await loadRelevantMemories(lastUserMsg.content, googleApiKey, embedderModel);
+  if (memories.length === 0) return;
+
+  messages[lastUserIdx] = { ...lastUserMsg, content: formatMemoryContext(memories) + lastUserMsg.content };
+  log(`JIT: prepended ${memories.length} relevant memories to user message`);
+}
+
+/**
+ * Strip all <context> blocks from every user message before persisting to
+ * session history — prevents exponential token bloat across turns.
+ */
+function stripAllMemoryContexts(
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+): void {
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === 'user' && typeof m.content === 'string' && m.content.includes('<context>')) {
+      messages[i] = { ...m, content: stripMemoryContext(m.content) };
+    }
+  }
+}
+
+/** Persist memory entries with embeddings to JSON file.
+ *
+ * Merges auto-extracted texts with any entries the agent explicitly saved
+ * via memory_store during the session. Agent-stored entries (which have an id)
+ * take precedence and are never overwritten by auto-extraction.
+ */
+async function saveStoredMemories(
+  memories: string[],
+  googleApiKey: string | undefined,
+  embedderModel: string,
+): Promise<void> {
   try {
     fs.mkdirSync(MEM0_DIR, { recursive: true });
+
+    // Load CURRENT file — includes any memory_store calls made during the session
+    const current = loadMemoryEntries();
+
+    // Build a lookup by text for reusing cached embeddings and preserving IDs
+    const byText = new Map(current.map((e) => [e.text.toLowerCase().trim(), e]));
+
+    // Union: keep all current entries + add auto-extracted texts not already present
+    const merged = new Map(current.map((e) => [e.text.toLowerCase().trim(), e]));
+    for (const text of memories) {
+      const key = text.toLowerCase().trim();
+      if (!merged.has(key)) {
+        merged.set(key, { text });
+      }
+    }
+
+    // Compute embeddings for entries that are missing them
+    const entries: StoredMemoryEntry[] = await Promise.all(
+      Array.from(merged.values()).map(async (entry) => {
+        if (entry.embedding) return entry; // already have embedding
+        if (!googleApiKey) return entry;
+        const embedding = await computeEmbedding(entry.text, googleApiKey, embedderModel) ?? undefined;
+        return { ...entry, embedding };
+      }),
+    );
+
+    // Suppress unused variable warning
+    void byText;
+
     const tmp = MEMORIES_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(memories, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify(entries, null, 2));
     fs.renameSync(tmp, MEMORIES_FILE);
-    log(`Saved ${memories.length} memories to ${MEMORIES_FILE}`);
+    log(`Saved ${entries.length} memories (${memories.length} auto-extracted, ${current.length} prior) to ${MEMORIES_FILE}`);
   } catch (err) {
     log(`Failed to save memories: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -140,7 +337,7 @@ function saveStoredMemories(memories: string[]): void {
  */
 const GEMINI_EMBEDDING_DIMS = 768;
 
-function buildMem0(openRouterApiKey: string, llmModel: string): Memory {
+function buildMem0(openRouterApiKey: string, llmModel: string, baseURL?: string): Memory {
   const googleApiKey = process.env.GOOGLE_API_KEY;
   if (!googleApiKey) throw new Error('GOOGLE_API_KEY not set — required for mem0 embeddings');
 
@@ -149,7 +346,7 @@ function buildMem0(openRouterApiKey: string, llmModel: string): Memory {
       provider: 'openai',
       config: {
         apiKey: openRouterApiKey,
-        baseURL: 'https://openrouter.ai/api/v1',
+        baseURL: baseURL || 'https://openrouter.ai/api/v1',
         model: llmModel,
       },
     },
@@ -166,6 +363,21 @@ function buildMem0(openRouterApiKey: string, llmModel: string): Memory {
       config: { collectionName: 'nanoclaw', dimension: GEMINI_EMBEDDING_DIMS },
     },
     disableHistory: true,
+    customPrompt: `You extract durable, reusable facts about the user from conversations.
+
+EXTRACT only things that are useful to know across future sessions:
+- User preferences and habits (e.g. "prefers the lights dimmed in the evening")
+- Named entity mappings (e.g. "kv gep Socket = coffee machine smart plug in Home Assistant")
+- Recurring routines or behavioural patterns across multiple sessions
+- Important personal context (people, places, projects the user cares about)
+
+DO NOT EXTRACT:
+- Current device states (on/off, temperature readings, sensor values) — these are transient and change constantly
+- Anything described as temporary or one-off ("ideiglenesen", "most", "egy rövid időre")
+- Trivial observations about what just happened in this conversation (the agent already has the full history)
+- Generic patterns like "user asks to turn things on/off" — this adds no useful context
+
+Return valid JSON with a 'facts' key containing an array of concise strings.`,
   });
 }
 
@@ -183,35 +395,45 @@ async function extractMemories(
   apiKey: string,
   llmModel: string,
   userId: string,
+  baseURL?: string,
 ): Promise<string[]> {
   try {
-    const mem = buildMem0(apiKey, llmModel);
-
-    // Add existing memories first so mem0 can deduplicate properly
-    if (existing.length > 0) {
-      // Inject as pre-existing user context to guide deduplication
-      await mem.add(
-        existing.map((m) => ({ role: 'system' as const, content: `[known fact] ${m}` })),
-        { userId },
-      );
-    }
-
-    // Add the actual conversation — mem0 extracts and deduplicates
+    // Extract new facts from THIS session only — never feed existing memories into mem0,
+    // as its deduplication LLM merges/deletes them unpredictably causing net memory loss.
     const convMessages = messages.filter(
-      (m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string',
+      (m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.length > 0,
     );
-    if (convMessages.length > 0) {
-      await mem.add(convMessages as { role: 'user' | 'assistant'; content: string }[], { userId });
+    if (convMessages.length === 0) {
+      log('No conversation messages to extract memories from');
+      return existing;
     }
+
+    const mem = buildMem0(apiKey, llmModel, baseURL);
+    await mem.add(convMessages as { role: 'user' | 'assistant'; content: string }[], { userId });
 
     const all = await mem.getAll({ userId });
     const results = (all as { results?: { memory?: string }[] }).results ?? [];
-    const extracted = results
+    const newlyExtracted = results
       .map((r) => r.memory ?? '')
-      .filter((m) => m.length > 0 && !m.startsWith('[known fact]'));
+      .filter((m) => m.length > 0);
 
-    log(`Extracted ${extracted.length} memories via mem0ai/oss`);
-    return extracted;
+    log(`Extracted ${newlyExtracted.length} new memories from session`);
+
+    // Merge: keep all existing, append new ones that aren't near-duplicates
+    const merged = [...existing];
+    for (const candidate of newlyExtracted) {
+      const isDuplicate = existing.some(
+        (e) => e.toLowerCase().includes(candidate.toLowerCase().slice(0, 20)) ||
+               candidate.toLowerCase().includes(e.toLowerCase().slice(0, 20)),
+      );
+      if (!isDuplicate) {
+        merged.push(candidate);
+        log(`New memory added: ${candidate.slice(0, 80)}`);
+      }
+    }
+
+    log(`Memory store: ${existing.length} existing + ${merged.length - existing.length} new = ${merged.length} total`);
+    return merged;
   } catch (err) {
     log(`Memory extraction failed: ${err instanceof Error ? err.message : String(err)}`);
     return existing; // Keep existing on failure
@@ -478,20 +700,21 @@ async function runQuery(
   systemPrompt: string,
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
   haClient?: Client | null,
+  isLocal?: boolean,
 ): Promise<string> {
   const allTools = [...LOCAL_TOOLS, ...mcpTools];
   let toolCallCount = 0;
 
   while (true) {
-    const provider = process.env.OPENROUTER_PROVIDER;
+    const provider = isLocal ? undefined : process.env.OPENROUTER_PROVIDER;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const response = await (openai.chat.completions.create as (body: any) => Promise<any>)({
+    const response = (await openai.chat.completions.create({
       model,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
       tools: allTools,
       tool_choice: 'auto',
       ...(provider ? { provider: { order: [provider], allow_fallbacks: false } } : {}),
-    });
+    } as any)) as any;
 
     const choice = response.choices[0];
     const assistantMsg = choice.message;
@@ -544,37 +767,69 @@ async function runQuery(
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 export async function runOpenRouterAgent(input: ContainerInput): Promise<void> {
-  const apiKey = process.env.OPENROUTER_API_KEY!;
-  const model = process.env.OPENROUTER_MODEL!;
-  const mem0LlmModel = process.env.MEM0_LLM_MODEL || model;
+  // Local model (LM Studio / Ollama / any OpenAI-compatible server) takes priority.
+  // Set LOCAL_MODEL_URL and LOCAL_MODEL in .env to activate; comment out to fall back to OpenRouter.
+  const localModelUrl = process.env.LOCAL_MODEL_URL;
+  const localModel = process.env.LOCAL_MODEL;
+  const isLocal = !!(localModelUrl && localModel);
+
+  const apiKey = isLocal ? (process.env.LOCAL_MODEL_API_KEY || 'lm-studio') : process.env.OPENROUTER_API_KEY!;
+  const model = isLocal ? localModel! : process.env.OPENROUTER_MODEL!;
+  // mem0 extraction always needs an OpenRouter-compatible key + endpoint.
+  // When using a local model, prefer a separate OPENROUTER_API_KEY if available.
+  // If not, fall back to the local endpoint so extraction still runs (with LOCAL_MODEL).
+  const mem0ApiKey = process.env.OPENROUTER_API_KEY || apiKey;
+  const mem0BaseURL = process.env.OPENROUTER_API_KEY
+    ? 'https://openrouter.ai/api/v1'
+    : localModelUrl!;
+  const mem0LlmModel = process.env.MEM0_LLM_MODEL || (process.env.OPENROUTER_API_KEY ? model : localModel!) || model;
   const mem0Enabled = process.env.MEM0_ENABLED !== '0';
 
-  if (!apiKey) {
+  if (!isLocal && !apiKey) {
     writeOutput({ status: 'error', result: null, error: 'OPENROUTER_API_KEY not set' });
     return;
   }
 
-  const openai = new OpenAI({
-    apiKey,
-    baseURL: 'https://openrouter.ai/api/v1',
-    defaultHeaders: {
-      'HTTP-Referer': 'https://github.com/qwibitai/nanoclaw',
-      'X-Title': 'NanoClaw',
-    },
-  });
+  const openai = isLocal
+    ? new OpenAI({
+        apiKey,
+        baseURL: localModelUrl!,
+      })
+    : new OpenAI({
+        apiKey,
+        baseURL: 'https://openrouter.ai/api/v1',
+        defaultHeaders: {
+          'HTTP-Referer': 'https://github.com/qwibitai/nanoclaw',
+          'X-Title': 'NanoClaw',
+        },
+      });
 
-  // MCP server
+  if (isLocal) {
+    log(`Using local model: ${model} at ${localModelUrl}`);
+  }
+
+  // MCP servers (IPC + Memory)
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
   let mcpClient: Client | null = null;
+  let memoryMcpClient: Client | null = null;
   let mcpTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
   try {
-    mcpClient = await startMcpClient(mcpServerPath, input.chatJid, input.groupFolder, input.isMain);
+    const ipcServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
+    mcpClient = await startMcpClient(ipcServerPath, input.chatJid, input.groupFolder, input.isMain);
     const { tools } = await mcpClient.listTools();
     mcpTools = mcpToolsToOpenAI(tools);
-    log(`MCP connected: ${tools.map((t) => t.name).join(', ')}`);
+    log(`MCP connected: ${tools.map((t: { name: string }) => t.name).join(', ')}`);
   } catch (err) {
     log(`MCP unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    const memServerPath = path.join(__dirname, 'memory-mcp-stdio.js');
+    memoryMcpClient = await startMcpClient(memServerPath, input.chatJid, input.groupFolder, input.isMain);
+    const { tools: memTools } = await memoryMcpClient.listTools();
+    mcpTools = [...mcpTools, ...mcpToolsToOpenAI(memTools)];
+    log(`Memory MCP connected: ${memTools.map((t: { name: string }) => t.name).join(', ')}`);
+  } catch (err) {
+    log(`Memory MCP unavailable: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // Home Assistant MCP server (SSE)
@@ -600,28 +855,13 @@ export async function runOpenRouterAgent(input: ContainerInput): Promise<void> {
     }
   }
 
-  // Load long-term memories from disk
-  const storedMemories = mem0Enabled ? loadStoredMemories() : [];
+  const googleApiKey = process.env.GOOGLE_API_KEY;
+  const embedderModel = process.env.MEM0_EMBEDDER_MODEL || 'gemini-embedding-2-preview';
 
   // mem0 user id — scoped per group
   const mem0UserId = `${input.groupFolder}-${input.chatJid}`.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 64);
 
-  // Build system prompt
-  let basePrompt = `You are ${input.assistantName || 'Tars'}, a personal assistant. You help with tasks, answer questions, and can use tools to get things done.\n\nYou are running in a Linux container. Your working directory is /workspace/group.`;
-  const claudeMdPath = '/workspace/group/CLAUDE.md';
-  if (fs.existsSync(claudeMdPath)) {
-    basePrompt = fs.readFileSync(claudeMdPath, 'utf-8') + `\n\nModel: ${model}`;
-  }
-
-  const systemPrompt = storedMemories.length > 0
-    ? `${basePrompt}\n\n## Memories from previous conversations\n${storedMemories.map((m) => `- ${m}`).join('\n')}`
-    : basePrompt;
-
-  if (storedMemories.length > 0) {
-    log(`Injected ${storedMemories.length} long-term memories into system prompt`);
-  }
-
-  // IPC setup
+  // IPC setup (done early so prompt drain works below)
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
   try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
 
@@ -629,6 +869,17 @@ export async function runOpenRouterAgent(input: ContainerInput): Promise<void> {
   let prompt = input.isScheduledTask ? `[SCHEDULED TASK]\n\n${input.prompt}` : input.prompt;
   const pending = drainIpcInput();
   if (pending.length > 0) prompt += '\n' + pending.join('\n');
+
+  // Load existing raw entries — needed only for mem0 extraction at session close.
+  // Per-turn memory retrieval is done JIT inside the query loop below.
+  const allStoredMemoryTexts = mem0Enabled ? loadMemoryEntries().map((e) => e.text) : [];
+
+  // Build system prompt (memories are NOT injected here; they are injected JIT per-turn)
+  let systemPrompt = `You are ${input.assistantName || 'Tars'}, a personal assistant. You help with tasks, answer questions, and can use tools to get things done.\n\nYou are running in a Linux container. Your working directory is /workspace/group.`;
+  const claudeMdPath = '/workspace/group/CLAUDE.md';
+  if (fs.existsSync(claudeMdPath)) {
+    systemPrompt = fs.readFileSync(claudeMdPath, 'utf-8') + `\n\nModel: ${model}`;
+  }
 
   // Load short-term session history
   const history = loadSessionHistory();
@@ -641,19 +892,40 @@ export async function runOpenRouterAgent(input: ContainerInput): Promise<void> {
   try {
     while (true) {
       log(`Running query with model: ${model}`);
-      const result = await runQuery(openai, mcpClient, mcpTools, model, systemPrompt, messages, haClient);
+
+      // JIT memory injection: query mem0 with the latest user message and prepend
+      // relevant memories as a <context> block directly on that message's content.
+      if (mem0Enabled) {
+        await injectJitMemoryContext(messages, googleApiKey, embedderModel);
+      }
+
+      const result = await runQuery(openai, mcpClient, mcpTools, model, systemPrompt, messages, haClient, isLocal);
+
+      // Strip injected <context> blocks BEFORE saving to session history.
+      // This is critical — leaving them in would re-inject stale context on every
+      // subsequent turn and cause exponential token bloat.
+      if (mem0Enabled) {
+        stripAllMemoryContexts(messages);
+      }
 
       saveSessionHistory(messages);
+
+      // Extract and persist memories after every turn — not just at session close.
+      // This ensures nothing is lost if the container crashes or is killed mid-session.
+      if (mem0Enabled) {
+        const updated = await extractMemories(messages, allStoredMemoryTexts, mem0ApiKey, mem0LlmModel, mem0UserId, mem0BaseURL);
+        await saveStoredMemories(updated, googleApiKey, embedderModel);
+        // Keep allStoredMemoryTexts in sync so the next turn's JIT injection is fresh
+        allStoredMemoryTexts.length = 0;
+        allStoredMemoryTexts.push(...updated.map((e) => (typeof e === 'string' ? e : (e as { text: string }).text)));
+      }
+
       writeOutput({ status: 'success', result });
 
       log('Waiting for next IPC message...');
       const nextMessage = await waitForIpcMessage();
       if (nextMessage === null) {
-        log('Session closed — extracting memories');
-        if (mem0Enabled) {
-          const updated = await extractMemories(messages, storedMemories, apiKey, mem0LlmModel, mem0UserId);
-          saveStoredMemories(updated);
-        }
+        log('Session closed');
         break;
       }
 
@@ -667,6 +939,7 @@ export async function runOpenRouterAgent(input: ContainerInput): Promise<void> {
     writeOutput({ status: 'error', result: null, error: errorMessage });
   } finally {
     if (mcpClient) { try { await mcpClient.close(); } catch { /* ignore */ } }
+    if (memoryMcpClient) { try { await memoryMcpClient.close(); } catch { /* ignore */ } }
     if (haClient) { try { await haClient.close(); } catch { /* ignore */ } }
   }
 }

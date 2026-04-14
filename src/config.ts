@@ -13,6 +13,9 @@ const envConfig = readEnvFile([
   'OPENROUTER_API_KEY',
   'OPENROUTER_MODEL',
   'OPENROUTER_PROVIDER',
+  'LOCAL_MODEL_URL',
+  'LOCAL_MODEL',
+  'LOCAL_MODEL_API_KEY',
   'GOOGLE_API_KEY',
   'MEM0_LLM_MODEL',
   'MEM0_EMBEDDER_MODEL',
@@ -111,6 +114,13 @@ export const OPENROUTER_MODEL =
   process.env.OPENROUTER_MODEL || envConfig.OPENROUTER_MODEL;
 export const OPENROUTER_PROVIDER =
   process.env.OPENROUTER_PROVIDER || envConfig.OPENROUTER_PROVIDER;
+// Local model (LM Studio / Ollama / any OpenAI-compatible server)
+export const LOCAL_MODEL_URL =
+  process.env.LOCAL_MODEL_URL || envConfig.LOCAL_MODEL_URL;
+export const LOCAL_MODEL =
+  process.env.LOCAL_MODEL || envConfig.LOCAL_MODEL;
+export const LOCAL_MODEL_API_KEY =
+  process.env.LOCAL_MODEL_API_KEY || envConfig.LOCAL_MODEL_API_KEY;
 export const GOOGLE_API_KEY =
   process.env.GOOGLE_API_KEY || envConfig.GOOGLE_API_KEY;
 export const MEM0_LLM_MODEL =
