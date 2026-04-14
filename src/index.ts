@@ -254,7 +254,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     lastAgentTimestamp[chatJid] = lastMessage.timestamp;
     saveState();
     const channel = findChannel(channels, chatJid);
-    await channel?.sendMessage?.(chatJid, 'Session lezárva. A következő üzenet új sessiont indít.');
+    await channel?.sendMessage?.(
+      chatJid,
+      'Session lezárva. A következő üzenet új sessiont indít.',
+    );
     return true;
   }
 
@@ -264,7 +267,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     saveState();
     const channel = findChannel(channels, chatJid);
     const killed = queue.killContainer(chatJid);
-    await channel?.sendMessage?.(chatJid, killed ? 'Container leállítva.' : 'Nincs aktív container.');
+    await channel?.sendMessage?.(
+      chatJid,
+      killed ? 'Container leállítva.' : 'Nincs aktív container.',
+    );
     return true;
   }
 
@@ -673,7 +679,10 @@ function acquireSingleInstanceLock(): void {
       if (!isNaN(existingPid) && existingPid !== process.pid) {
         try {
           process.kill(existingPid, 0); // throws if not running
-          logger.warn({ existingPid }, 'Killing previous nanoclaw instance (lock file)');
+          logger.warn(
+            { existingPid },
+            'Killing previous nanoclaw instance (lock file)',
+          );
           process.kill(existingPid, 'SIGTERM');
         } catch {
           // Stale lock — process already gone
@@ -682,7 +691,13 @@ function acquireSingleInstanceLock(): void {
     }
     fs.writeFileSync(LOCK_FILE, String(process.pid));
     // Clean up lock on exit so a restart doesn't see a stale PID
-    process.once('exit', () => { try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ } });
+    process.once('exit', () => {
+      try {
+        fs.unlinkSync(LOCK_FILE);
+      } catch {
+        /* ignore */
+      }
+    });
   } catch (err) {
     logger.warn({ err }, 'Could not manage instance lock file');
   }

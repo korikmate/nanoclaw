@@ -286,7 +286,8 @@ async function buildContainerArgs(
   // Local model (LM Studio / Ollama): pass URL, model name, and optional API key
   if (LOCAL_MODEL_URL) args.push('-e', `LOCAL_MODEL_URL=${LOCAL_MODEL_URL}`);
   if (LOCAL_MODEL) args.push('-e', `LOCAL_MODEL=${LOCAL_MODEL}`);
-  if (LOCAL_MODEL_API_KEY) args.push('-e', `LOCAL_MODEL_API_KEY=${LOCAL_MODEL_API_KEY}`);
+  if (LOCAL_MODEL_API_KEY)
+    args.push('-e', `LOCAL_MODEL_API_KEY=${LOCAL_MODEL_API_KEY}`);
   // mem0 local memory extraction
   if (MEM0_LLM_MODEL) args.push('-e', `MEM0_LLM_MODEL=${MEM0_LLM_MODEL}`);
   if (MEM0_EMBEDDER_MODEL)
